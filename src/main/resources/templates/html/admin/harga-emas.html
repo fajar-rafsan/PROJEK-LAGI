@@ -1034,6 +1034,9 @@
                             Harga</button>
                         <button class="btn btn-primary" id="updateAllBtn"><i class="fas fa-sync-alt"></i> Update
                             Semua</button>
+                        <button class="btn btn-secondary" id="refreshBtn" style="background: var(--info-color);"><i class="fas fa-refresh"></i> Refresh</button>
+                        <button class="btn btn-secondary" id="reliableRefreshBtn" style="background: var(--success-color);"><i class="fas fa-shield-alt"></i> Reliable Refresh</button>
+                        <button class="btn btn-secondary" id="debugBtn" style="background: var(--warning-color);"><i class="fas fa-bug"></i> Debug</button>
                     </div>
                 </div>
 
@@ -1202,17 +1205,41 @@
             async init() {
                 this.setupEventListeners();
                 this.setupCurrencyInputFormatters(); // Setup currency input formatters
+                
+                console.log('Initializing GoldPriceManager...');
+                
                 // Load data secara berurutan
                 await this.loadCurrentPrices();
-                await this.loadPriceChanges();
-                await this.loadPriceHistory();
+                console.log('Current prices loaded:', this.currentPrices);
                 
-                // Hitung perubahan harga yang lebih akurat
-                await this.calculatePriceChanges();
-
+                await this.loadPriceChanges();
+                console.log('Price changes loaded:', this.priceChanges);
+                
+                await this.loadPriceHistory();
+                console.log('Price history loaded, length:', this.priceHistory.length);
+                
+                // Hitung perubahan harga yang lebih akurat jika tidak ada data dari database
+                if (!this.hasValidPriceChanges()) {
+                    console.log('No valid price changes from database, calculating from history...');
+                    await this.calculatePriceChanges();
+                }
+                
                 // Setelah semua data ter-load, baru render
                 this.renderCurrentPrices();
                 this.loadCurrentPricesInForm();
+                
+                console.log('Initialization completed');
+            }
+
+            // Method untuk cek apakah ada data perubahan harga yang valid
+            hasValidPriceChanges() {
+                if (!this.priceChanges) return false;
+                
+                const requiredPurities = ['24k', '22k', '18k'];
+                return requiredPurities.some(purity => {
+                    const change = this.priceChanges[purity];
+                    return change && change.oldPrice > 0 && change.newPrice > 0;
+                });
             }
 
             setupEventListeners() {
@@ -1330,6 +1357,42 @@
                 }
 
                 this.setupPriceInputFormatting();
+
+                // Refresh button
+                const refreshBtn = document.getElementById('refreshBtn');
+                if (refreshBtn) {
+                    refreshBtn.addEventListener('click', () => {
+                        this.forceRefreshAllData();
+                    });
+                }
+
+                // Debug button
+                const debugBtn = document.getElementById('debugBtn');
+                if (debugBtn) {
+                    debugBtn.addEventListener('click', () => {
+                        this.debugPriceChanges();
+                    });
+                }
+
+                // Reliable Refresh button
+                const reliableRefreshBtn = document.getElementById('reliableRefreshBtn');
+                if (reliableRefreshBtn) {
+                    reliableRefreshBtn.addEventListener('click', async () => {
+                        const originalText = reliableRefreshBtn.innerHTML;
+                        reliableRefreshBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Refreshing...';
+                        reliableRefreshBtn.disabled = true;
+                        
+                        try {
+                            await this.reliableRefreshData();
+                            this.showNotification('Reliable refresh berhasil!', 'success');
+                        } catch (error) {
+                            this.showNotification('Reliable refresh gagal: ' + error.message, 'error');
+                        } finally {
+                            reliableRefreshBtn.innerHTML = originalText;
+                            reliableRefreshBtn.disabled = false;
+                        }
+                    });
+                }
             }
 
             toggleMobileSidebar() {
@@ -1434,34 +1497,57 @@
 
                     console.log('Price changes response:', result);
 
-                    if (result.success && result.data && result.data.changes) {
-                        const changes = result.data.changes;
+                    if (result.success && result.data && Array.isArray(result.data) && result.data.length > 0) {
+                        const changes = result.data;
                         this.priceChanges = {};
-                        const requiredPurities = ['24k', '22k', '18k'];
+                        
+                        // Process each change from database
+                        changes.forEach(change => {
+                            if (change.purity) {
+                                // Convert purity to lowercase for consistency
+                                const purityKey = change.purity.toLowerCase();
+                                
+                                this.priceChanges[purityKey] = {
+                                    purity: purityKey,
+                                    oldPrice: change.oldPrice || 0,
+                                    newPrice: change.newPrice || 0,
+                                    changeAmount: change.changeAmount || 0,
+                                    changePercent: change.changePercent || 0,
+                                    changeType: change.changeType || 'STABLE',
+                                    changeDate: change.changeDate ? new Date(change.changeDate) : new Date(),
+                                    updatedBy: change.changeSource || 'System',
+                                    notes: change.notes || ''
+                                };
+                                
+                                console.log(`Processed change for ${purityKey}:`, this.priceChanges[purityKey]);
+                            }
+                        });
 
+                        // Pastikan semua purity memiliki data
+                        const requiredPurities = ['24k', '22k', '18k'];
                         requiredPurities.forEach(purity => {
-                            const changeForPurity = changes.find(change => change.purity === purity);
-                            if (changeForPurity) {
-                                this.priceChanges[purity] = changeForPurity;
-                            } else {
-                                // Jika tidak ada perubahan, buat data default
+                            if (!this.priceChanges[purity]) {
+                                // Jika tidak ada perubahan untuk purity ini, buat data default
                                 this.priceChanges[purity] = {
                                     purity: purity,
                                     oldPrice: 0,
                                     newPrice: 0,
+                                    changeAmount: 0,
+                                    changePercent: 0,
                                     changeType: 'STABLE',
                                     description: 'Belum ada perubahan harga',
-                                    timestamp: new Date(),
+                                    changeDate: new Date(),
                                     updatedBy: 'System'
                                 };
                             }
                         });
+                        
+                        console.log('Final price changes from database:', this.priceChanges);
                     } else {
-                        // Jika tidak ada data perubahan, coba ambil dari history untuk perbandingan
+                        console.log('No valid changes data from database, trying history fallback...');
+                        // Jika tidak ada data perubahan yang valid, coba ambil dari history untuk perbandingan
                         await this.loadPriceChangesFromHistory();
                     }
-
-                    console.log('Price changes loaded:', this.priceChanges);
 
                 } catch (error) {
                     console.error('Error loading price changes:', error);
@@ -1483,8 +1569,8 @@
                         const latest = result.data.content[0];
                         const previous = result.data.content[1];
 
-                        console.log('Latest price:', latest);
-                        console.log('Previous price:', previous);
+                        console.log('Latest price from history:', latest);
+                        console.log('Previous price from history:', previous);
 
                         this.priceChanges = {};
                         const requiredPurities = ['24k', '22k', '18k'];
@@ -1495,6 +1581,8 @@
 
                             const latestPrice = latest[purityKey] || 0;
                             const previousPrice = previous[purityKey] || 0;
+
+                            console.log(`Processing ${purity}: latest=${latestPrice}, previous=${previousPrice}`);
 
                             if (latestPrice > 0 && previousPrice > 0) {
                                 const change = latestPrice - previousPrice;
@@ -1509,8 +1597,11 @@
                                     changePercent: changePercent,
                                     changeType: changeType,
                                     changeDate: new Date(latest.tanggalAmbil),
-                                    updatedBy: latest.goldPriceEnum || 'System'
+                                    updatedBy: latest.goldPriceEnum || 'System',
+                                    source: 'HISTORY_FALLBACK'
                                 };
+
+                                console.log(`Created change from history for ${purity}:`, this.priceChanges[purity]);
                             } else {
                                 this.priceChanges[purity] = {
                                     purity: purity,
@@ -1520,13 +1611,15 @@
                                     changePercent: 0,
                                     changeType: 'STABLE',
                                     changeDate: new Date(latest.tanggalAmbil),
-                                    updatedBy: latest.goldPriceEnum || 'System'
+                                    updatedBy: latest.goldPriceEnum || 'System',
+                                    source: 'HISTORY_FALLBACK'
                                 };
                             }
                         });
 
                         console.log('Price changes from history:', this.priceChanges);
                     } else {
+                        console.log('No sufficient history data available, creating default changes');
                         // Jika tidak ada history yang cukup, buat data default
                         this.createDefaultPriceChanges();
                     }
@@ -1538,15 +1631,16 @@
             }
 
             // Method untuk menghitung perubahan harga yang lebih akurat
-            calculatePriceChanges() {
+            async calculatePriceChanges() {
                 try {
                     console.log('Calculating price changes...');
                     
                     // Ambil data history untuk perbandingan
-                    this.loadPriceHistoryForChanges().then(() => {
-                        console.log('Price changes calculated:', this.priceChanges);
-                        this.renderCurrentPrices(); // Re-render setelah data berubah
-                    });
+                    await this.loadPriceHistoryForChanges();
+                    console.log('Price changes calculated:', this.priceChanges);
+                    
+                    // Re-render setelah data berubah
+                    this.renderCurrentPrices();
                 } catch (error) {
                     console.error('Error calculating price changes:', error);
                 }
@@ -1710,7 +1804,10 @@
                     let changeText = 'Belum ada perubahan harga';
                     let changeTime = '';
 
+                    console.log(`Rendering ${item.key}:`, { currentPrice, changeData });
+
                     if (changeData && changeData.oldPrice > 0 && changeData.newPrice > 0) {
+                        // Gunakan data dari database jika tersedia
                         change = changeData.changeAmount || (changeData.newPrice - changeData.oldPrice);
                         changePercent = changeData.changePercent || Math.abs(Math.round((change / changeData.oldPrice) * 100 * 100) / 100);
 
@@ -1741,62 +1838,71 @@
                             } else if (diffHours > 0) {
                                 changeTime = `${diffHours} jam yang lalu`;
                             } else {
-                                changeTime = 'Baru saja';
+                                const diffMinutes = Math.floor(diffMs / (1000 * 60));
+                                if (diffMinutes > 0) {
+                                    changeTime = `${diffMinutes} menit yang lalu`;
+                                } else {
+                                    changeTime = 'Baru saja';
+                                }
                             }
                         }
-                    } else {
+                        
+                        console.log(`Change data for ${item.key}:`, { change, changePercent, changeType, changeTime });
+                    } else if (currentPrice > 0) {
                         // Jika tidak ada data perubahan yang valid, coba cari dari history
-                        if (currentPrice > 0) {
-                            // Cek apakah ada data history untuk purity ini
-                            const hasHistory = this.priceHistory && this.priceHistory.length > 0;
+                        const hasHistory = this.priceHistory && this.priceHistory.length > 0;
+                        
+                        if (hasHistory) {
+                            // Cari data terbaru dari history
+                            const latestHistory = this.priceHistory[0];
+                            const latestPrice = latestHistory.prices[item.key];
                             
-                            if (hasHistory) {
-                                // Cari data terbaru dari history
-                                const latestHistory = this.priceHistory[0];
-                                const latestPrice = latestHistory.prices[item.key];
+                            if (latestPrice && latestPrice !== currentPrice) {
+                                // Ada perubahan dari history
+                                const change = latestPrice - currentPrice;
+                                const changePercent = currentPrice > 0 ? Math.abs((change / currentPrice) * 100) : 0;
                                 
-                                if (latestPrice && latestPrice !== currentPrice) {
-                                    // Ada perubahan dari history
-                                    const change = latestPrice - currentPrice;
-                                    const changePercent = currentPrice > 0 ? Math.abs((change / currentPrice) * 100) : 0;
-                                    
-                                    if (change > 0) {
-                                        changeType = 'positive';
-                                        changeIcon = 'fa-arrow-up';
-                                        changeText = `+${this.formatCurrency(change)} (+${changePercent.toFixed(2)}%)`;
-                                    } else {
-                                        changeType = 'negative';
-                                        changeIcon = 'fa-arrow-down';
-                                        changeText = `${this.formatCurrency(change)} (-${changePercent.toFixed(2)}%)`;
-                                    }
-                                    
-                                    // Hitung waktu perubahan
-                                    const changeDate = latestHistory.date;
-                                    const now = new Date();
-                                    const diffMs = now - changeDate;
-                                    const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
-                                    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-                                    
-                                    if (diffDays > 0) {
-                                        changeTime = `${diffDays} hari yang lalu`;
-                                    } else if (diffHours > 0) {
-                                        changeTime = `${diffHours} jam yang lalu`;
+                                if (change > 0) {
+                                    changeType = 'positive';
+                                    changeIcon = 'fa-arrow-up';
+                                    changeText = `+${this.formatCurrency(change)} (+${changePercent.toFixed(2)}%)`;
+                                } else {
+                                    changeType = 'negative';
+                                    changeIcon = 'fa-arrow-down';
+                                    changeText = `${this.formatCurrency(change)} (-${changePercent.toFixed(2)}%)`;
+                                }
+                                
+                                // Hitung waktu perubahan
+                                const changeDate = latestHistory.date;
+                                const now = new Date();
+                                const diffMs = now - changeDate;
+                                const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+                                const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+                                
+                                if (diffDays > 0) {
+                                    changeTime = `${diffDays} hari yang lalu`;
+                                } else if (diffHours > 0) {
+                                    changeTime = `${diffHours} jam yang lalu`;
+                                } else {
+                                    const diffMinutes = Math.floor(diffMs / (1000 * 60));
+                                    if (diffMinutes > 0) {
+                                        changeTime = `${diffMinutes} menit yang lalu`;
                                     } else {
                                         changeTime = 'Baru saja';
                                     }
-                                } else {
-                                    // Tidak ada perubahan
-                                    changeText = 'Harga stabil';
-                                    changeTime = 'Tidak ada perubahan terbaru';
                                 }
                             } else {
-                                changeText = 'Harga saat ini tersedia';
-                                changeTime = 'Data history tidak tersedia';
+                                // Tidak ada perubahan
+                                changeText = 'Harga stabil';
+                                changeTime = 'Tidak ada perubahan terbaru';
                             }
                         } else {
-                            changeText = 'Harga belum tersedia';
-                            changeTime = 'Data tidak tersedia';
+                            changeText = 'Harga saat ini tersedia';
+                            changeTime = 'Data history tidak tersedia';
                         }
+                    } else {
+                        changeText = 'Harga belum tersedia';
+                        changeTime = 'Data tidak tersedia';
                     }
 
                     return `
@@ -2362,21 +2468,40 @@
                         this.showManualUpdateMessage('Harga emas berhasil diperbarui!', 'success');
                         this.showNotification('Harga emas berhasil diperbarui!', 'success');
 
-                        // Refresh data
-                        await this.loadCurrentPrices();
-                        await this.loadPriceChanges();
-                        await this.loadPriceHistory();
-                        this.renderCurrentPrices();
-                        this.loadCurrentPricesToForm();
-                        
-                        // Refresh perubahan harga
-                        await this.calculatePriceChanges();
-                        this.renderCurrentPrices();
+                        // Tunggu sebentar agar backend selesai menyimpan data
+                        await new Promise(resolve => setTimeout(resolve, 1000));
 
+                        // Refresh data secara berurutan dengan delay
+                        console.log('Refreshing data after manual update...');
+                        
+                        // 1. Load current prices terlebih dahulu
+                        await this.loadCurrentPrices();
+                        console.log('Current prices refreshed:', this.currentPrices);
+                        
+                        // 2. Load price changes dari database (yang baru)
+                        await this.loadPriceChanges();
+                        console.log('Price changes refreshed:', this.priceChanges);
+                        
+                        // 3. Load price history
+                        await this.loadPriceHistory();
+                        console.log('Price history refreshed, length:', this.priceHistory.length);
+                        
+                        // 4. Jika tidak ada data perubahan yang valid dari database, hitung dari history
+                        if (!this.hasValidPriceChanges()) {
+                            console.log('No valid price changes from database, calculating from history...');
+                            await this.calculatePriceChanges();
+                        }
+                        
+                        // 5. Render ulang tampilan
+                        this.renderCurrentPrices();
+                        this.loadCurrentPricesInForm();
+                        
                         // Clear form jika update berhasil
                         if (price24kElement) price24kElement.value = '';
                         if (price22kElement) price22kElement.value = '';
                         if (price18kElement) price18kElement.value = '';
+                        
+                        console.log('Manual update completed and data refreshed');
                     } else {
                         throw new Error(result.message || 'Gagal mengupdate harga emas');
                     }
@@ -2420,14 +2545,36 @@
 
                         await this.updateGoldPriceManual(purityNumber, hargaJual, hargaBeli);
 
-                        // Reload data
+                        // Tunggu sebentar agar backend selesai menyimpan data
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+
+                        // Refresh data secara berurutan dengan delay
+                        console.log(`Refreshing data after quick update for ${purity}...`);
+                        
+                        // 1. Load current prices terlebih dahulu
                         await this.loadCurrentPrices();
+                        console.log('Current prices refreshed:', this.currentPrices);
+                        
+                        // 2. Load price changes dari database (yang baru)
                         await this.loadPriceChanges();
+                        console.log('Price changes refreshed:', this.priceChanges);
+                        
+                        // 3. Load price history
                         await this.loadPriceHistory();
+                        console.log('Price history refreshed, length:', this.priceHistory.length);
+                        
+                        // 4. Jika tidak ada data perubahan yang valid dari database, hitung dari history
+                        if (!this.hasValidPriceChanges()) {
+                            console.log('No valid price changes from database, calculating from history...');
+                            await this.calculatePriceChanges();
+                        }
+                        
+                        // 5. Render ulang tampilan
                         this.renderCurrentPrices();
                         this.loadCurrentPricesInForm();
 
                         this.showNotification(`Harga emas ${purity.toUpperCase()} berhasil diperbarui!`, 'success');
+                        console.log(`Quick update for ${purity} completed and data refreshed`);
                     } catch (error) {
                         this.showNotification(`Gagal memperbarui harga emas ${purity.toUpperCase()}`, 'error');
                     }
@@ -2601,15 +2748,39 @@
                             this.showUpdateMessage(`Update berhasil! Harga yang diupdate: ${updateMessage}`, 'success');
                             this.showNotification('Update harga emas berhasil!', 'success');
                             
-                            // Refresh data dan update status indicator
+                            // Tunggu lebih lama agar backend selesai menyimpan data perubahan harga
+                            await new Promise(resolve => setTimeout(resolve, 2000));
+                            
+                            // Refresh data secara berurutan dengan delay
+                            console.log('Refreshing data after update all from external API...');
+                            
+                            // 1. Load current prices terlebih dahulu
                             await this.loadCurrentPrices();
+                            console.log('Current prices refreshed:', this.currentPrices);
+                            
+                            // 2. Load price changes dari database (yang baru) - tunggu lebih lama
+                            await new Promise(resolve => setTimeout(resolve, 1000));
                             await this.loadPriceChanges();
+                            console.log('Price changes refreshed:', this.priceChanges);
+                            
+                            // 3. Load price history
                             await this.loadPriceHistory();
+                            console.log('Price history refreshed, length:', this.priceHistory.length);
+                            
+                            // 4. Jika tidak ada data perubahan yang valid dari database, hitung dari history
+                            if (!this.hasValidPriceChanges()) {
+                                console.log('No valid price changes from database, calculating from history...');
+                                await this.calculatePriceChanges();
+                            }
+                            
+                            // 5. Render ulang tampilan
                             this.renderCurrentPrices();
                             this.updateApiStatusWithCurrentPrices();
                             
                             // Refresh kalkulator jika ada input yang sudah diisi
                             this.refreshCalculator();
+                            
+                            console.log('Update all from external API completed and data refreshed');
                         } else {
                             throw new Error(result.message || 'Gagal mengupdate harga emas');
                         }
@@ -2649,15 +2820,39 @@
                                 this.showUpdateMessage("Force update berhasil! Semua harga telah diperbarui.", 'success');
                                 this.showNotification('Force update berhasil!', 'success');
                                 
-                                // Refresh data dan update status indicator
+                                // Tunggu lebih lama agar backend selesai menyimpan data perubahan harga
+                                await new Promise(resolve => setTimeout(resolve, 2000));
+                                
+                                // Refresh data secara berurutan dengan delay
+                                console.log('Refreshing data after force update from external API...');
+                                
+                                // 1. Load current prices terlebih dahulu
                                 await this.loadCurrentPrices();
+                                console.log('Current prices refreshed:', this.currentPrices);
+                                
+                                // 2. Load price changes dari database (yang baru) - tunggu lebih lama
+                                await new Promise(resolve => setTimeout(resolve, 1000));
                                 await this.loadPriceChanges();
+                                console.log('Price changes refreshed:', this.priceChanges);
+                                
+                                // 3. Load price history
                                 await this.loadPriceHistory();
+                                console.log('Price history refreshed, length:', this.priceHistory.length);
+                                
+                                // 4. Jika tidak ada data perubahan yang valid dari database, hitung dari history
+                                if (!this.hasValidPriceChanges()) {
+                                    console.log('No valid price changes from database, calculating from history...');
+                                    await this.calculatePriceChanges();
+                                }
+                                
+                                // 5. Render ulang tampilan
                                 this.renderCurrentPrices();
                                 this.updateApiStatusWithCurrentPrices();
                                 
                                 // Refresh kalkulator jika ada input yang sudah diisi
                                 this.refreshCalculator();
+                                
+                                console.log('Force update from external API completed and data refreshed');
                             } else {
                                 throw new Error(result.message || 'Gagal melakukan force update');
                             }
@@ -2909,6 +3104,8 @@
                 console.log('Current prices:', this.currentPrices);
                 console.log('Price changes:', this.priceChanges);
                 console.log('External price:', this.externalPrice);
+                console.log('Price history length:', this.priceHistory ? this.priceHistory.length : 0);
+                console.log('Has valid price changes:', this.hasValidPriceChanges());
                 
                 try {
                     // Test endpoint history
@@ -2930,8 +3127,16 @@
                     if (changesRes.ok) {
                         const changesData = await changesRes.json();
                         console.log('Changes data:', changesData);
+                        
+                        if (changesData.success && changesData.data) {
+                            console.log('Price changes from API:');
+                            changesData.data.forEach((change, index) => {
+                                console.log(`${index + 1}. ${change.purity}: ${change.oldPrice} -> ${change.newPrice} (${change.changeType}, ${change.changePercent}%)`);
+                                console.log(`   Date: ${change.changeDate}, Source: ${change.changeSource}, Notes: ${change.notes}`);
+                            });
+                        }
                     } else {
-                        console.log('Changes endpoint not available');
+                        console.log('Changes endpoint not available or error:', changesRes.status);
                     }
                     
                     // Test endpoint external
@@ -2940,7 +3145,72 @@
                         const externalData = await externalRes.json();
                         console.log('External price data:', externalData);
                     } else {
-                        console.log('External endpoint not available');
+                        console.log('External endpoint not available or error:', externalRes.status);
+                    }
+                    
+                    // Test endpoint latest
+                    const latestRes = await fetch('/gold-price/latest');
+                    if (latestRes.ok) {
+                        const latestData = await latestRes.json();
+                        console.log('Latest price data:', latestData);
+                    } else {
+                        console.log('Latest endpoint not available or error:', latestRes.status);
+                    }
+                    
+                    // Debug rendering data
+                    console.log('=== RENDERING DEBUG ===');
+                    const requiredPurities = ['24k', '22k', '18k'];
+                    requiredPurities.forEach(purity => {
+                        const changeData = this.priceChanges[purity];
+                        console.log(`${purity}:`, {
+                            currentPrice: this.currentPrices[purity],
+                            changeData: changeData,
+                            hasValidChange: changeData && changeData.oldPrice > 0 && changeData.newPrice > 0
+                        });
+                    });
+                    
+                    // Debug source tracking
+                    console.log('=== SOURCE TRACKING DEBUG ===');
+                    if (changesRes.ok && changesData.success && changesData.data) {
+                        const sources = {};
+                        changesData.data.forEach(change => {
+                            if (!sources[change.changeSource]) {
+                                sources[change.changeSource] = [];
+                            }
+                            sources[change.changeSource].push({
+                                purity: change.purity,
+                                oldPrice: change.oldPrice,
+                                newPrice: change.newPrice,
+                                date: change.changeDate
+                            });
+                        });
+                        console.log('Changes grouped by source:', sources);
+                    }
+                    
+                    // Debug karat ratio calculation
+                    console.log('=== KARAT RATIO DEBUG ===');
+                    if (this.currentPrices['24k'] > 0) {
+                        const basePrice24k = this.currentPrices['24k'];
+                        const expected22k = Math.round(basePrice24k * 0.9167);
+                        const expected18k = Math.round(basePrice24k * 0.75);
+                        const actual22k = this.currentPrices['22k'];
+                        const actual18k = this.currentPrices['18k'];
+                        
+                        console.log('Karat ratio calculation:');
+                        console.log(`  24K (base): ${basePrice24k}`);
+                        console.log(`  22K expected: ${expected22k} (${basePrice24k} * 0.9167)`);
+                        console.log(`  22K actual: ${actual22k}`);
+                        console.log(`  22K difference: ${actual22k - expected22k}`);
+                        console.log(`  18K expected: ${expected18k} (${basePrice24k} * 0.75)`);
+                        console.log(`  18K actual: ${actual18k}`);
+                        console.log(`  18K difference: ${actual18k - expected18k}`);
+                        
+                        // Check if ratios are correct
+                        const ratio22kCorrect = Math.abs(actual22k - expected22k) <= 1000; // Tolerance 1000 rupiah
+                        const ratio18kCorrect = Math.abs(actual18k - expected18k) <= 1000; // Tolerance 1000 rupiah
+                        
+                        console.log(`  22K ratio correct: ${ratio22kCorrect ? '✅' : '❌'}`);
+                        console.log(`  18K ratio correct: ${ratio18kCorrect ? '✅' : '❌'}`);
                     }
                     
                 } catch (error) {
@@ -2948,6 +3218,76 @@
                 }
                 
                 console.log('=== END DEBUG ===');
+            }
+
+            // Method untuk force refresh semua data
+            async forceRefreshAllData() {
+                try {
+                    console.log('Force refreshing all data...');
+                    
+                    // Clear existing data
+                    this.currentPrices = {};
+                    this.priceChanges = {};
+                    this.priceHistory = [];
+                    
+                    // Reload semua data secara berurutan
+                    await this.loadCurrentPrices();
+                    await this.loadPriceChanges();
+                    await this.loadPriceHistory();
+                    
+                    // Jika tidak ada data perubahan yang valid dari database, hitung dari history
+                    if (!this.hasValidPriceChanges()) {
+                        console.log('No valid price changes from database, calculating from history...');
+                        await this.calculatePriceChanges();
+                    }
+                    
+                    // Render ulang
+                    this.renderCurrentPrices();
+                    this.loadCurrentPricesInForm();
+                    
+                    console.log('Force refresh completed');
+                    this.showNotification('Data berhasil di-refresh!', 'success');
+                } catch (error) {
+                    console.error('Error during force refresh:', error);
+                    this.showNotification('Gagal refresh data: ' + error.message, 'error');
+                }
+            }
+
+            // Method untuk refresh data dengan lebih reliable
+            async reliableRefreshData() {
+                try {
+                    console.log('Starting reliable data refresh...');
+                    
+                    // 1. Load current prices
+                    await this.loadCurrentPrices();
+                    console.log('Step 1: Current prices loaded');
+                    
+                    // 2. Load price changes dari database
+                    await this.loadPriceChanges();
+                    console.log('Step 2: Price changes loaded');
+                    
+                    // 3. Load price history
+                    await this.loadPriceHistory();
+                    console.log('Step 3: Price history loaded');
+                    
+                    // 4. Jika tidak ada data perubahan yang valid dari database, hitung dari history
+                    if (!this.hasValidPriceChanges()) {
+                        console.log('Step 4: Calculating price changes from history...');
+                        await this.calculatePriceChanges();
+                    } else {
+                        console.log('Step 4: Valid price changes found in database');
+                    }
+                    
+                    // 5. Render ulang tampilan
+                    this.renderCurrentPrices();
+                    this.loadCurrentPricesInForm();
+                    
+                    console.log('Reliable refresh completed successfully');
+                    return true;
+                } catch (error) {
+                    console.error('Error during reliable refresh:', error);
+                    return false;
+                }
             }
 
             // Method untuk show update message
